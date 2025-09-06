@@ -736,10 +736,10 @@ pub fn setAllocator(allocator: std.mem.Allocator) void {
 /// The global Roaring allocator is used for bookkeeping; this function frees
 ///  that memory.  The C API does not expose a way to reset memory functions to
 ///  their defaults, so you only use this when you're done using Bitmaps.
-/// Note: With header-based allocation tracking, this function no longer needs
-///  to free any bookkeeping memory, but is kept for API compatibility.
 pub fn freeAllocator() void {
-    // No cleanup needed with header-based allocation tracking
+    if (global_roaring_allocator) |ally| {
+        allocations.deinit(ally);
+    }
 }
 
 /// Roaring only supports a single, global allocator
@@ -748,58 +748,34 @@ var global_roaring_allocator: ?std.mem.Allocator = null;
 // The roaring_resize function uses pointers instead of slices, making functions
 //  like `realloc` tricky as the Allocator interface expects slices.  This means
 //  that we have to track the lengths associated with allocations somehow.
-//
-// This implementation uses a header-based approach: we allocate extra space
-// to store the allocation size before the actual data, then return a pointer
-// offset by the header size. This avoids the HashMap overhead which was
-// causing performance issues in union operations.
-
-const AllocationHeader = struct {
-    size: usize,
-};
-
-const HEADER_SIZE = @sizeOf(AllocationHeader);
+// A relatively cheap implementation would prefix allocations with a header to
+//  store the length, but this makes aligned allocations really challenging.
+// This implementation uses a hash map where the pointers are the keys and the
+//  values are the lengths.
+var allocations = std.AutoHashMapUnmanaged(?*anyopaque, usize){};
 
 fn setAllocation(mem: []u8) ?*anyopaque {
-    if (mem.len < HEADER_SIZE) return null;
-
-    // Store size in the header
-    const header = @as(*AllocationHeader, @ptrCast(@alignCast(mem.ptr)));
-    header.size = mem.len - HEADER_SIZE;
-
-    // Return pointer offset by header size
-    return @as(?*anyopaque, @ptrCast(mem.ptr + HEADER_SIZE));
+    if (global_roaring_allocator) |ally| {
+        const ptr = @as(?*anyopaque, @ptrCast(mem.ptr));
+        allocations.put(ally, ptr, mem.len) catch return null;
+        return ptr;
+    }
+    @panic("global_roaring_allocator is not set");
 }
 
 fn getAllocation(ptr: ?*anyopaque) []u8 {
-    if (ptr == null) @panic("getAllocation received null pointer");
-
-    // Get header by going back from the user pointer
-    const user_ptr = @as([*]u8, @ptrCast(ptr));
-    const header_ptr = user_ptr - HEADER_SIZE;
-    const header = @as(*AllocationHeader, @ptrCast(@alignCast(header_ptr)));
-
-    // Return slice covering the user data
-    return user_ptr[0..header.size];
+    const len = allocations.get(ptr) orelse @panic("getAllocation cannot find pointer");
+    return @as([*]u8, @ptrCast(ptr))[0..len];
 }
 
 fn getRemoveAllocation(ptr: ?*anyopaque) []u8 {
-    if (ptr == null) @panic("getRemoveAllocation received null pointer");
-
-    // Get header by going back from the user pointer
-    const user_ptr = @as([*]u8, @ptrCast(ptr));
-    const header_ptr = user_ptr - HEADER_SIZE;
-    const header = @as(*AllocationHeader, @ptrCast(@alignCast(header_ptr)));
-
-    // Return slice covering the user data
-    return user_ptr[0..header.size];
+    const kv = allocations.fetchRemove(ptr) orelse @panic("removeAllocationn cannot find pointer");
+    return @as([*c]u8, @ptrCast(ptr))[0..kv.value];
 }
 
 export fn roaringMalloc(size: usize) ?*anyopaque {
     if (global_roaring_allocator) |ally| {
-        // Allocate extra space for header
-        const total_size = size + HEADER_SIZE;
-        return setAllocation(ally.alloc(u8, total_size) catch return null);
+        return setAllocation(ally.alloc(u8, size) catch return null);
     }
     return null;
 }
@@ -817,11 +793,7 @@ export fn roaringRealloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
         return null;
     } else if (global_roaring_allocator) |ally| {
         const old = getAllocation(ptr);
-        // We need to get the full allocation including header for realloc
-        const old_full = @as([*]u8, @ptrCast(ptr)) - HEADER_SIZE;
-        const old_full_slice = old_full[0 .. old.len + HEADER_SIZE];
-        const new_total_size = size + HEADER_SIZE;
-        return setAllocation(ally.realloc(old_full_slice, new_total_size) catch return null);
+        return setAllocation(ally.realloc(old, size) catch return null);
     } else return null;
 }
 
@@ -840,25 +812,20 @@ export fn roaringFree(ptr: ?*anyopaque) void {
     if (ptr == null) return;
 
     if (global_roaring_allocator) |ally| {
-        const user_data = getRemoveAllocation(ptr);
-        // Free the full allocation including header
-        const full_ptr = @as([*]u8, @ptrCast(ptr)) - HEADER_SIZE;
-        const full_slice = full_ptr[0 .. user_data.len + HEADER_SIZE];
-        ally.free(full_slice);
+        ally.free(getRemoveAllocation(ptr));
     } else @panic("roaringFree was called but global_roaring_allocator is not set");
 }
 
 export fn roaringAlignedMalloc(ptr_align: usize, size: usize) ?*anyopaque {
     if (global_roaring_allocator) |ally| {
-        const total_size = size + HEADER_SIZE;
         return setAllocation(
             // Allocator's alignment parameter has to be comptime known, so we
             //  have to do this somewhat awkward transform:
             switch (ptr_align) {
-                8 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(8), total_size),
-                16 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(16), total_size),
+                8 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(8), size),
+                16 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(16), size),
                 // This appears to be the only value that is actually used in roaring.c
-                32 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(32), total_size),
+                32 => ally.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(32), size),
                 else => @panic("Unexpected alignment size"),
             } catch return null);
     }
