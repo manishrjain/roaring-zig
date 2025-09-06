@@ -47,10 +47,6 @@ if ! command -v zig >/dev/null 2>&1; then
   exit 1
 fi
 
-# AVX512 detection is now handled automatically by Zig's build system
-# The build.zig will auto-detect CPU features and disable AVX512 if needed
-DISABLE_AVX512_FLAG=""
-
 # Configure with CMake using zig as the C/C++ compiler
 mkdir -p "$BUILD_DIR"
 echo "[INFO] Configuring CMake in $BUILD_DIR (BUILD_TYPE=$BUILD_TYPE)"
