@@ -4,9 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Add option to disable AVX512 in CRoaring
+    const disable_avx512 = b.option(bool, "ROARING_DISABLE_AVX512", "Disable AVX512 in CRoaring") orelse false;
+
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
-    const lib = add(b, target, optimize);
+    const lib = add(b, target, optimize, disable_avx512);
     b.installArtifact(lib);
 
     var main_tests = b.addTest(.{
@@ -78,7 +81,8 @@ pub fn build(b: *std.Build) void {
     roaring64_mod.addImport("roaring", roaring_mod);
     bench.root_module.addImport("roaring64", roaring64_mod);
     // Compile CRoaring C source into the bench so Zig wrapper can link
-    bench.addCSourceFile(.{ .file = b.path("croaring/roaring.c"), .flags = &.{} });
+    const bench_flags: []const []const u8 = if (disable_avx512) &[_][]const u8{"-DCROARING_COMPILER_SUPPORTS_AVX512=0"} else &[_][]const u8{};
+    bench.addCSourceFile(.{ .file = b.path("croaring/roaring.c"), .flags = bench_flags });
     bench.addIncludePath(b.path("croaring"));
     bench.linkLibC();
     const run_bench = b.addRunArtifact(bench);
@@ -92,7 +96,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// Add Roaring Bitmaps to your build process
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, disable_avx512: bool) *std.Build.Step.Compile {
     var lib = b.addLibrary(.{
         .name = "roaring-zig",
         .root_module = b.createModule(.{
@@ -103,7 +107,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .linkage = .static,
     });
 
-    lib.addCSourceFile(.{ .file = b.path("croaring/roaring.c"), .flags = &.{} });
+    const lib_flags: []const []const u8 = if (disable_avx512) &[_][]const u8{"-DCROARING_COMPILER_SUPPORTS_AVX512=0"} else &[_][]const u8{};
+    lib.addCSourceFile(.{ .file = b.path("croaring/roaring.c"), .flags = lib_flags });
     lib.addIncludePath(b.path("croaring"));
     lib.linkLibC();
     return lib;
