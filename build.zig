@@ -4,8 +4,26 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Add option to disable AVX512 in CRoaring
-    const disable_avx512 = b.option(bool, "ROARING_DISABLE_AVX512", "Disable AVX512 in CRoaring") orelse false;
+    // Add option to disable AVX512 in CRoaring, or auto-detect CPU capabilities
+    const disable_avx512 = b.option(bool, "ROARING_DISABLE_AVX512", "Disable AVX512 in CRoaring") orelse blk: {
+        // Auto-detect: disable AVX512 if the target CPU doesn't support it
+        const resolved_target = b.resolveTargetQuery(target.query);
+        const cpu_features = resolved_target.result.cpu.features;
+        const has_avx512f = cpu_features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512f));
+        const has_avx512dq = cpu_features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512dq));
+        const has_avx512bw = cpu_features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512bw));
+        
+        // CRoaring requires multiple AVX512 features, not just AVX512F
+        const has_required_avx512 = has_avx512f and has_avx512dq and has_avx512bw;
+        
+        if (!has_required_avx512) {
+            std.log.info("AVX512 features not detected on target CPU, disabling AVX512 in CRoaring", .{});
+        } else {
+            std.log.info("AVX512 features detected on target CPU, enabling AVX512 optimizations", .{});
+        }
+        
+        break :blk !has_required_avx512;
+    };
 
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
