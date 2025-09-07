@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const roaring = @import("roaring");
 const roaring64 = @import("roaring64");
 const c = @cImport({
@@ -60,6 +61,21 @@ fn readAllIntegerFiles(allocator: std.mem.Allocator, dir_path: []const u8) ![][]
     for (names) |n| allocator.free(n);
     allocator.free(names);
     return out;
+}
+
+// Returns the calling thread's consumed CPU time in nanoseconds if supported;
+// otherwise returns null. Currently implemented for Linux and BSDs.
+fn threadCpuTimeNs() ?u64 {
+    switch (builtin.os.tag) {
+        .linux, .freebsd, .netbsd, .openbsd, .dragonfly => {
+            var ts: std.posix.timespec = undefined;
+            std.posix.clock_gettime(std.posix.CLOCK.THREAD_CPUTIME_ID, &ts) catch return null;
+            const secs: u64 = @intCast(ts.tv_sec);
+            const nsecs: u64 = @intCast(ts.tv_nsec);
+            return secs * 1_000_000_000 + nsecs;
+        },
+        else => return null,
+    }
 }
 
 fn parseU32List(allocator: std.mem.Allocator, bytes: []const u8) ![]u32 {
@@ -175,13 +191,22 @@ fn runBenchmarks(allocator: std.mem.Allocator, ds: *const DataSet, data_source: 
 
         // one warm-up
         marker_sum += b.func(ds);
-
-        var timer = std.time.Timer.start() catch unreachable;
-        while (true) {
-            marker_sum += b.func(ds);
-            iterations += 1;
-            total_ns = timer.read();
-            if (total_ns >= target_total_ns) break;
+        if (threadCpuTimeNs()) |t0| {
+            while (true) {
+                marker_sum += b.func(ds);
+                iterations += 1;
+                const now = threadCpuTimeNs().?;
+                total_ns = now - t0;
+                if (total_ns >= target_total_ns) break;
+            }
+        } else {
+            var timer = std.time.Timer.start() catch unreachable;
+            while (true) {
+                marker_sum += b.func(ds);
+                iterations += 1;
+                total_ns = timer.read();
+                if (total_ns >= target_total_ns) break;
+            }
         }
         const avg_ns: u64 = if (iterations > 0) total_ns / iterations else 0;
         std.debug.print("{s:<36}{d:12} ns {d:12}\n", .{ b.name, avg_ns, iterations });
